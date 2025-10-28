@@ -82,15 +82,23 @@ func main() {
 	http.HandleFunc("/run/cryptol", handleRun("cryptol"))
 	http.HandleFunc("/run/saw", handleRun("saw"))
 
-	cert := "server.crt"
-	key := "server.key"
-	if _, err := os.Stat(cert); os.IsNotExist(err) {
-		log.Println("No TLS certs found — generating self-signed certs...")
-		exec.Command("openssl", "req", "-x509", "-newkey", "rsa:2048",
-			"-nodes", "-keyout", key, "-out", cert,
-			"-subj", "/CN=localhost", "-days", "365").Run()
-	}
+	port := ":8443"
 
-	log.Println("SAW/Cryptol API running on https://0.0.0.0:8443")
-	log.Fatal(http.ListenAndServeTLS(":8443", cert, key, nil))
+	useTLS := false //made this a toggle because cloudflare 
+
+	if useTLS {
+		cert := "server.crt"
+		key := "server.key"
+		if _, err := os.Stat(cert); os.IsNotExist(err) {
+			log.Println("No TLS certs found — generating self-signed certs...")
+			exec.Command("openssl", "req", "-x509", "-newkey", "rsa:2048",
+				"-nodes", "-keyout", key, "-out", cert,
+				"-subj", "/CN=localhost", "-days", "365").Run()
+		}
+		log.Println("SAW/Cryptol API running on https://0.0.0.0" + port)
+		log.Fatal(http.ListenAndServeTLS(port, cert, key, nil))
+	} else {
+		log.Println("SAW/Cryptol API running on http://0.0.0.0" + port)
+		log.Fatal(http.ListenAndServe(port, nil))
+	}
 }
