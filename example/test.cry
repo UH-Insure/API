@@ -1,0 +1,6 @@
+// Simple Cryptol example
+add : [8] -> [8] -> [8]
+add x y = x + y
+
+// Example property
+property add_commutes x y = add x y == add y x

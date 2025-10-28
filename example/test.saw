@@ -1,0 +1,6 @@
+// Simple SAW example using Cryptol
+print "Running SAW example"
+cryptol_load "example/test.cry";
+print "Checking add_commutes property..."
+check add_commutes;
+print "Done."
