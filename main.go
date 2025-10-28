@@ -7,11 +7,13 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 )
 
 type RunRequest struct {
 	FilePath string   `json:"file_path"`
+	Code     string   `json:"code,omitempty"` // NEW: allows inline source code
 	Args     []string `json:"args,omitempty"`
 }
 
@@ -46,6 +48,7 @@ func runCommand(tool string, args []string) (string, string, error) {
 	}
 }
 
+// handleRun wraps command execution for /run/{tool} endpoints
 func handleRun(tool string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -53,7 +56,7 @@ func handleRun(tool string) http.HandlerFunc {
 			return
 		}
 
-		// Optional API key
+		// Optional API key check
 		apiKey := os.Getenv("API_KEY")
 		if apiKey != "" && r.Header.Get("X-API-Key") != apiKey {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -66,8 +69,38 @@ func handleRun(tool string) http.HandlerFunc {
 			return
 		}
 
-		args := append([]string{req.FilePath}, req.Args...)
+		// Decide input file path
+		path := req.FilePath
+		if req.Code != "" {
+			// Create a temp file under /work
+			tmpDir := "/work"
+			if _, err := os.Stat(tmpDir); os.IsNotExist(err) {
+				os.MkdirAll(tmpDir, 0755)
+			}
+			tmpFile, err := os.CreateTemp(tmpDir, tool+"-*.input")
+			if err != nil {
+				http.Error(w, "Failed to create temp file: "+err.Error(), 500)
+				return
+			}
+			defer os.Remove(tmpFile.Name())
+
+			if _, err := tmpFile.WriteString(req.Code); err != nil {
+				http.Error(w, "Failed to write temp file: "+err.Error(), 500)
+				return
+			}
+			tmpFile.Close()
+
+			path = tmpFile.Name()
+		}
+
+		if path == "" {
+			http.Error(w, "Missing file_path or code", http.StatusBadRequest)
+			return
+		}
+
+		args := append([]string{filepath.Base(path)}, req.Args...)
 		stdout, stderr, err := runCommand(tool, args)
+
 		resp := RunResponse{Stdout: stdout, Stderr: stderr}
 		if err != nil {
 			resp.Error = err.Error()
@@ -83,8 +116,7 @@ func main() {
 	http.HandleFunc("/run/saw", handleRun("saw"))
 
 	port := ":8443"
-
-	useTLS := false //made this a toggle because cloudflare 
+	useTLS := false // toggle TLS
 
 	if useTLS {
 		cert := "server.crt"
