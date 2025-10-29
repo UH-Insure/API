@@ -1,9 +1,11 @@
 # API
-go api to run cryptol and saw files from collab
+all this does is connect the cryptol api to collab. The go files connected the compiler on my computer to collab for saw and cryptol, but this was deemed unecessary so now all it does is connect cryptol api to collab.
 
 
 
-# SAW + Cryptol Remote API
+# old stuff
+
+## SAW + Cryptol Remote API
 
 A Go HTTPS API for running SAW and Cryptol commands from remote clients
 (e.g. Google Colab) via Cloudflare tunnel.
@@ -22,9 +24,10 @@ docker run -p 8443:8443 saw-cryptol-api
 
 ## Server setup
 
-git pull origin main 
-
-sudo podman build -t saw-cryptol-api .
-sudo podman stop saw-cryptol-api
-sudo podman rm saw-cryptol-api
-sudo podman run -d --name saw-cryptol-api -p 8443:8443 saw-cryptol-api
+git pull origin main
+sudo podman build -t localhost/saw-cryptol-api:latest .
+sudo podman run -d --replace \
+  --name saw-cryptol-api \
+  -p 8443:8443 \
+  -v $(pwd)/work:/work:Z \
+  localhost/saw-cryptol-api:latest
