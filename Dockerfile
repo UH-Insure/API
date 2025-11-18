@@ -9,10 +9,25 @@ FROM ghcr.io/galoisinc/cryptol:3.2.0 AS cryptolsrc
 ##### Go Builder
 FROM golang:1.22 AS gobuild
 WORKDIR /app
+
+# Install dependencies needed for CGO + sqlite3
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc g++ make libsqlite3-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+# Enable CGO (sqlite3 requires CGO)
+ENV CGO_ENABLED=1
+ENV CC=gcc
+
+# Download Go module deps
 COPY go.mod go.sum ./
 RUN go mod download
+
+# Copy full project
 COPY . .
-RUN CGO_ENABLED=0 go build -o sawapi main.go
+
+# Build API with CGO
+RUN go build -o sawapi main.go
 
 
 ##############################################
