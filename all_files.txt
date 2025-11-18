@@ -1,0 +1,752 @@
+/Users/hmm/INSURE/API/go.mod
+module api
+
+go 1.22
+
+require (
+	github.com/google/uuid v1.6.0
+	github.com/mattn/go-sqlite3 v1.14.22
+)
+
+/Users/hmm/INSURE/API/Dockerfile
+# ============================================
+# SAW + Cryptol + Solvers + Go API + SQLite
+# ============================================
+
+# Pull upstream SAW & Cryptol distributions
+FROM ghcr.io/galoisinc/saw:nightly AS sawsrc
+FROM ghcr.io/galoisinc/cryptol:3.2.0 AS cryptolsrc
+
+# Go builder
+FROM golang:1.22 AS gobuild
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o sawapi main.go
+
+# Main runtime container
+FROM ubuntu:22.04
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install base tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates wget curl gnupg lsb-release software-properties-common \
+    build-essential clang-16 clang-tools-16 z3 sqlite3 git python3 python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install C compiler support
+RUN update-alternatives --install /usr/bin/cc  cc  /usr/bin/clang-16  100 && \
+    update-alternatives --install /usr/bin/c++ c++ /usr/bin/clang++-16 100
+
+# Copy SAW & Cryptol toolchains
+COPY --from=sawsrc /usr/local /usr/local
+COPY --from=cryptolsrc /usr/local /usr/local
+
+ENV PATH="/usr/local/bin:${PATH}"
+
+# Create runtime workspace
+RUN mkdir -p /work && mkdir -p /data
+
+# Copy Go API server
+COPY --from=gobuild /app/sawapi /usr/local/bin/sawapi
+
+# Copy example files for testing
+COPY example /work/example
+
+# SQLite DB
+COPY internal/schema.sql /data/schema.sql
+
+# Initialize DB at container start if missing
+COPY internal/init-db.sh /usr/local/bin/init-db.sh
+RUN chmod +x /usr/local/bin/init-db.sh
+
+EXPOSE 8443
+CMD ["/usr/local/bin/init-db.sh"]
+/Users/hmm/INSURE/API/go.sum
+github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
+github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
+github.com/mattn/go-sqlite3 v1.14.22 h1:2gZY6PC6kBnID23Tichd1K+Z0oS6nE/XwU+Vz/5o4kU=
+github.com/mattn/go-sqlite3 v1.14.22/go.mod h1:Uh1q+B4BYcTPb+yiD3kU8Ct7aC0hY9fxUwlHK0RXw+Y=
+
+/Users/hmm/INSURE/API/docker-compose.yml
+version: "3.9"
+
+services:
+  cryptol:
+    build: .
+    container_name: cryptol-remote-api
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    environment:
+      TZ: UTC
+      CRYPTOL_PATH: /usr/local/share/cryptol/lib
+/Users/hmm/INSURE/API/flattener.py
+#!/usr/bin/env python3
+"""
+flattener.py
+
+Usage:
+    # Flatten a specific subfolder into all_files.txt at the repo root
+    python flattener.py file/file
+"""
+
+import os
+import argparse
+from pathlib import Path
+
+def write_all_files_here(
+    out_name: str = "all_files.txt",
+    include_hidden: bool = False,
+    target_subpath: str | None = None
+) -> None:
+    # The "root" is where this script sits, and where the output will be written.
+    root_dir = Path(__file__).resolve().parent
+    out_path = root_dir / out_name
+
+    # Determine which directory to scan:
+    # - If target_subpath is provided, scan that subdir (relative to root)
+    # - Otherwise, scan the root itself (legacy behavior)
+    scan_dir = root_dir
+    if target_subpath:
+        # Normalize and ensure the scan_dir is inside root_dir
+        candidate = (root_dir / target_subpath).resolve()
+        try:
+            candidate.relative_to(root_dir)
+        except ValueError:
+            raise ValueError(
+                f"Refusing to scan outside the root: {candidate} is not within {root_dir}"
+            )
+        if not candidate.exists() or not candidate.is_dir():
+            raise FileNotFoundError(f"Target directory does not exist: {candidate}")
+        scan_dir = candidate
+
+    with out_path.open("w", encoding="utf-8", errors="replace") as out_f:
+        for dirpath, dirnames, filenames in os.walk(scan_dir):
+            # Skip hidden directories/files unless requested
+            if not include_hidden:
+                dirnames[:] = [d for d in dirnames if not d.startswith('.')]
+                filenames = [f for f in filenames if not f.startswith('.')]
+
+            for fname in filenames:
+                file_path = Path(dirpath) / fname
+                # Skip the output file itself (in case scan_dir == root)
+                if file_path.resolve() == out_path.resolve():
+                    continue
+
+                # Write the file path (relative to root for readability)
+                try:
+                    rel_from_root = file_path.resolve().relative_to(root_dir)
+                    out_f.write(f"{root_dir / rel_from_root}\n")
+                except Exception:
+                    # Fallback to absolute if relative fails for any reason
+                    out_f.write(f"{file_path.resolve()}\n")
+
+                # Try to read as text
+                try:
+                    with file_path.open("r", encoding="utf-8", errors="replace") as f:
+                        for line in f:
+                            out_f.write(line)
+                except Exception as e:
+                    out_f.write(f"<ERROR: cannot read file: {e}>\n")
+
+                out_f.write("\n")  # blank line between entries
+
+    print(f"Wrote flattened file list to: {out_path}")
+    if scan_dir != root_dir:
+        print(f"Scanned directory: {scan_dir} (relative to root: {scan_dir.relative_to(root_dir)})")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Flatten files/contents into a single text file at the repo root.")
+    parser.add_argument(
+        "target_subpath",
+        nargs="?",
+        default=None,
+        help="Relative path from the script's directory to the folder to scan (e.g. Backend/api-gateway-go). "
+             "If omitted, the root directory (where this script lives) is scanned."
+    )
+    parser.add_argument(
+        "--out-name",
+        default="all_files.txt",
+        help="Name of the output file written at the repo root (default: all_files.txt)."
+    )
+    parser.add_argument(
+        "--include-hidden",
+        action="store_true",
+        help="Include hidden files and directories (those starting with '.')."
+    )
+    args = parser.parse_args()
+
+    write_all_files_here(
+        out_name=args.out_name,
+        include_hidden=args.include_hidden,
+        target_subpath=args.target_subpath
+    )
+
+if __name__ == "__main__":
+    main()
+/Users/hmm/INSURE/API/main.go
+package main
+
+import (
+	"log"
+	"net/http"
+	"os"
+
+    "api/api"
+    "api/internal/compiler"
+    "api/internal/storage"
+)
+
+func main() {
+	// --- Load API key ---
+	apiKey := os.Getenv("API_KEY")
+	if apiKey == "" {
+		apiKey = "dev-key"
+	}i 
+
+	// --- Init storage ---
+	store, err := storage.NewStorage("/work/history.db")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// --- Runner ---
+	runner := compiler.NewRunner()
+
+	// --- API ---
+	app := api.NewAPI(runner, store, apiKey)
+
+	// ---- ROUTES ----
+	http.Handle("/run/cryptol", app.RunHandler("cryptol"))
+	http.Handle("/run/saw", app.RunHandler("saw"))
+	http.Handle("/run/c", app.RunHandler("c"))
+
+	http.Handle("/store/upload", app.UploadHandler())
+	http.Handle("/store/get/", http.StripPrefix("/store/get/", app.GetFile()))
+	http.Handle("/history", app.HistoryHandler())
+
+	log.Println("API listening on :8443")
+	log.Fatal(http.ListenAndServe(":8443", nil))
+}
+/Users/hmm/INSURE/API/example/test.cry
+
+/Users/hmm/INSURE/API/example/test.c
+
+/Users/hmm/INSURE/API/example/test.saw
+
+/Users/hmm/INSURE/API/internal/compliler/compiler.go
+package compiler
+
+import (
+	"bytes"
+	"context"
+	"log"
+	"os/exec"
+	"path/filepath"
+	"time"
+)
+
+// Runner wraps all execution logic
+type Runner struct{}
+
+func NewRunner() *Runner {
+	return &Runner{}
+}
+
+//
+// --- Generic command runner ---
+//
+
+func (r *Runner) runCmd(timeout time.Duration, cmdName string, args ...string) (string, string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, cmdName, args...)
+	cmd.Dir = "/work"
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Start()
+	if err != nil {
+		return "", "", err
+	}
+
+	err = cmd.Wait()
+
+	// Detect timeout
+	if ctx.Err() == context.DeadlineExceeded {
+		return stdout.String(), stderr.String(), ctx.Err()
+	}
+
+	return stdout.String(), stderr.String(), err
+}
+
+//
+// --- Cryptol ---
+//
+
+func (r *Runner) RunCryptol(inputPath string) (string, string, error) {
+	// cryptol <file>
+	return r.runCmd(
+		30*time.Second,
+		"cryptol",
+		filepath.Base(inputPath),
+	)
+}
+
+//
+// --- SAW ---
+//
+
+func (r *Runner) RunSAW(inputPath string) (string, string, error) {
+	// saw <file>
+	return r.runCmd(
+		60*time.Second,
+		"saw",
+		filepath.Base(inputPath),
+	)
+}
+
+//
+// --- Compile C → LLVM bitcode ---
+//
+
+func (r *Runner) CompileCToBitcode(cPath string) (string, string, error) {
+	bcOut := filepath.Base(cPath) + ".bc"
+
+	stdout, stderr, err := r.runCmd(
+		30*time.Second,
+		"clang-16",
+		"-emit-llvm",
+		"-c",
+		filepath.Base(cPath),
+		"-o",
+		bcOut,
+	)
+
+	return stdout, stderr, err
+}
+
+//
+// --- Multi-dispatch ---
+//
+
+func (r *Runner) Execute(tool string, inputPath string) (string, string, error) {
+	switch tool {
+	case "cryptol":
+		return r.RunCryptol(inputPath)
+
+	case "saw":
+		return r.RunSAW(inputPath)
+
+	case "c":
+		return r.CompileCToBitcode(inputPath)
+
+	default:
+		return "", "", exec.ErrNotFound
+	}
+}
+/Users/hmm/INSURE/API/internal/auth/auth.go
+package internal
+
+import "net/http"
+
+// Simple API-key auth can be expanded later.
+func RequireKeyMiddleware(apiKey string, next http.HandlerFunc) http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        if apiKey != "" && r.Header.Get("X-API-Key") != apiKey {
+            http.Error(w, "Unauthorized", http.StatusUnauthorized)
+            return
+        }
+        next(w, r)
+    }
+}
+/Users/hmm/INSURE/API/internal/models/models.go
+package internal
+
+// Placeholder models file
+// (You can add shared structures here if needed later)
+
+type HistoryEntry struct {
+    ID       string
+    Filename string
+    Tool     string
+    Created  string
+}
+/Users/hmm/INSURE/API/internal/storage/sqlite.go
+package storage
+
+import (
+    "database/sql"
+    _ "github.com/mattn/go-sqlite3"
+)
+
+func InitSQLite(path string) (*sql.DB, error) {
+    db, err := sql.Open("sqlite3", path)
+    if err != nil {
+        return nil, err
+    }
+
+    _, err = db.Exec(`
+        CREATE TABLE IF NOT EXISTS history (
+            id TEXT PRIMARY KEY,
+            filename TEXT,
+            path TEXT,
+            tool TEXT,
+            stdout TEXT,
+            stderr TEXT,
+            error TEXT,
+            created TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    `)
+    return db, err
+}
+/Users/hmm/INSURE/API/internal/storage/storage.go
+package storage
+
+import (
+	"database/sql"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+
+	_ "github.com/mattn/go-sqlite3"
+	"github.com/google/uuid"
+)
+
+type Storage struct {
+	DB *sql.DB
+}
+
+type StoredFile struct {
+	ID       string
+	Path     string
+	Filename string
+}
+
+func NewStorage(dbPath string) (*Storage, error) {
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		return nil, err
+	}
+
+	s := &Storage{DB: db}
+	err = s.init()
+	return s, err
+}
+
+func (s *Storage) init() error {
+	_, err := s.DB.Exec(`
+		CREATE TABLE IF NOT EXISTS history (
+			id TEXT PRIMARY KEY,
+			filename TEXT,
+			path TEXT,
+			tool TEXT,
+			stdout TEXT,
+			stderr TEXT,
+			error TEXT,
+			created TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);
+	`)
+	return err
+}
+
+//
+// ---- FILE STORAGE ----
+//
+
+func (s *Storage) SaveFile(originalName string, data []byte) (*StoredFile, error) {
+	id := uuid.New().String()
+
+	dir := "/work/files"
+	os.MkdirAll(dir, 0755)
+
+	dst := filepath.Join(dir, id+"_"+originalName)
+	if err := os.WriteFile(dst, data, 0644); err != nil {
+		return nil, err
+	}
+
+	return &StoredFile{
+		ID:       id,
+		Path:     dst,
+		Filename: originalName,
+	}, nil
+}
+
+func (s *Storage) LoadFile(id string) (*StoredFile, []byte, error) {
+	dir := "/work/files"
+
+	matches, _ := filepath.Glob(filepath.Join(dir, id+"_*"))
+	if len(matches) == 0 {
+		return nil, nil, fmt.Errorf("file not found")
+	}
+
+	path := matches[0]
+	base := filepath.Base(path)
+	_, filename, _ := strings.Cut(base, "_")
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return &StoredFile{
+		ID:       id,
+		Path:     path,
+		Filename: filename,
+	}, data, nil
+}
+
+//
+// ---- HISTORY LOG ----
+//
+
+func (s *Storage) SaveHistory(id, filename, path, tool, stdout, stderr, errStr string) error {
+	_, err := s.DB.Exec(`
+		INSERT INTO history (id, filename, path, tool, stdout, stderr, error)
+		VALUES (?, ?, ?, ?, ?, ?, ?);
+	`, id, filename, path, tool, stdout, stderr, errStr)
+	return err
+}
+
+func (s *Storage) ListHistory(limit int) ([]map[string]any, error) {
+	rows, err := s.DB.Query(`
+		SELECT id, filename, tool, created
+		FROM history
+		ORDER BY created DESC
+		LIMIT ?;
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var res []map[string]any
+
+	for rows.Next() {
+		var id, filename, tool string
+		var created string
+		rows.Scan(&id, &filename, &tool, &created)
+
+		res = append(res, map[string]any{
+			"id":       id,
+			"filename": filename,
+			"tool":     tool,
+			"created":  created,
+		})
+	}
+
+	return res, nil
+}
+/Users/hmm/INSURE/API/DOCS/README.md
+# SAW + Cryptol + C Compiler API
+
+This is a containerized API that:
+
+Compiles & runs Cryptol  
+Compiles & runs SAW proofs  
+Compiles C code to LLVM bytecode for SAW  
+Stores all submitted code in SQLite  
+Allows password-protected API key access  
+Allows Google Colab clients to evaluate models
+
+---
+
+## Endpoints
+
+### POST `/run/cryptol`
+Run Cryptol code.
+
+### POST `/run/saw`
+Run SAW scripts.  
+If script references C files, they are compiled automatically.
+
+### POST `/upload`
+Upload cryptol/saw/c files (stored in SQLite + disk).
+
+### GET `/files/{id}`
+Download stored file.
+
+---
+
+## Environment Variables
+API key will be printed on startup
+API_KEY=yourapikey
+
+podman build -t crysawapi .
+podman run -p 8443:8443 crysawapi
+/Users/hmm/INSURE/API/api/api.go
+package api
+
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+
+
+    "api/internal/auth"
+    "api/internal/compiler"
+    "api/internal/models"
+    "api/internal/storage"
+)
+
+
+type API struct {
+	Runner  *compiler.Runner
+	Storage *storage.Storage
+	APIKey  string
+}
+
+func NewAPI(r *compiler.Runner, s *storage.Storage, key string) *API {
+	return &API{Runner: r, Storage: s, APIKey: key}
+}
+
+//
+// ----- AUTH MIDDLEWARE -----
+//
+
+func (api *API) RequireKey(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if api.APIKey == "" {
+			next(w, r)
+			return
+		}
+		if r.Header.Get("X-API-Key") != api.APIKey {
+			http.Error(w, "Unauthorized", 401)
+			return
+		}
+		next(w, r)
+	}
+}
+
+//
+// ---- /run/{tool} ----
+//
+
+type RunRequest struct {
+	Code string `json:"code"`
+}
+
+type RunResponse struct {
+	Stdout string `json:"stdout"`
+	Stderr string `json:"stderr"`
+	Error  string `json:"error,omitempty"`
+	ID     string `json:"id"`
+}
+
+func (api *API) RunHandler(tool string) http.HandlerFunc {
+	return api.RequireKey(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			http.Error(w, "POST only", 405)
+			return
+		}
+
+		var body RunRequest
+		json.NewDecoder(r.Body).Decode(&body)
+
+		if body.Code == "" {
+			http.Error(w, "missing code", 400)
+			return
+		}
+
+		// --- Save input file ---
+		f, err := api.Storage.SaveFile(tool+".input", []byte(body.Code))
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+
+		// --- Run the tool ---
+		stdout, stderr, execErr := api.Runner.Execute(tool, f.Path)
+
+		errMsg := ""
+		if execErr != nil {
+			errMsg = execErr.Error()
+		}
+
+		api.Storage.SaveHistory(
+			f.ID, f.Filename, f.Path,
+			tool, stdout, stderr, errMsg,
+		)
+
+		json.NewEncoder(w).Encode(RunResponse{
+			ID:     f.ID,
+			Stdout: stdout,
+			Stderr: stderr,
+			Error:  errMsg,
+		})
+	})
+}
+
+//
+// ---- File Upload ----
+//
+
+func (api *API) UploadHandler() http.HandlerFunc {
+	return api.RequireKey(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseMultipartForm(10 << 20)
+
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		defer file.Close()
+
+		data, _ := io.ReadAll(file)
+
+		f, err := api.Storage.SaveFile(header.Filename, data)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"id":       f.ID,
+			"filename": f.Filename,
+		})
+	})
+}
+
+//
+// ---- Get stored file ----
+//
+
+func (api *API) GetFile() http.HandlerFunc {
+	return api.RequireKey(func(w http.ResponseWriter, r *http.Request) {
+		id := filepath.Base(r.URL.Path)
+
+		f, data, err := api.Storage.LoadFile(id)
+		if err != nil {
+			http.Error(w, err.Error(), 404)
+			return
+		}
+
+		w.Header().Set("Content-Disposition", "attachment; filename="+f.Filename)
+		w.Write(data)
+	})
+}
+
+//
+// ---- History ----
+//
+
+func (api *API) HistoryHandler() http.HandlerFunc {
+	return api.RequireKey(func(w http.ResponseWriter, r *http.Request) {
+		h, err := api.Storage.ListHistory(50)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+
+		json.NewEncoder(w).Encode(h)
+	})
+}
