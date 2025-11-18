@@ -3,7 +3,6 @@ package compiler
 import (
 	"bytes"
 	"context"
-	"log"
 	"os/exec"
 	"path/filepath"
 	"time"

@@ -7,9 +7,7 @@ import (
 	"path/filepath"
 
 
-    "api/internal/auth"
     "api/internal/compiler"
-    "api/internal/models"
     "api/internal/storage"
 )
 
